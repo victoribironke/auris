@@ -2,22 +2,44 @@
 
 A fast, keyboard-first launcher for Windows, built with Rust and Slint.
 
-## Current scope
+## Personal alpha features
 
-The first vertical slice contains:
-
-- A native desktop UI built with Slint
-- Application discovery from the per-user and machine-wide Start Menu
+- Slint desktop UI
+- Start Menu `.lnk` application discovery
+- Application aliases based on names
 - Fuzzy application search
-- Keyboard-first result activation
-- A provider-oriented structure ready for calculator, commands, and file search
+- Calculator expressions such as `45 * 12`
+- System commands: `lock`, `sleep`, `shutdown`, and `restart`
+- Configurable file search roots
+- Background crawling of Desktop, Documents, and Downloads
+- File-name search while the crawler is running
+- A low-privilege Inno Setup installer definition in `installer/auris.iss`
+
+The configuration file is stored at `%LOCALAPPDATA%\Auris\config.txt`. Each line is a directory to crawl. The file is created with default user folders on first launch.
 
 ## Development
 
-Install the Rust toolchain, then run:
+Install Rust and the Microsoft C++ Build Tools, then run:
 
-```sh
+```powershell
+cargo check
 cargo run
 ```
 
-The initial app index reads Start Menu `.lnk` files. Windows-specific global hotkey and window activation behavior will be added next, followed by usage ranking and background file indexing.
+For an optimized executable:
+
+```powershell
+cargo build --release
+```
+
+The executable is written to `target\release\auris.exe`.
+
+## Current limitations
+
+The global hotkey, resident background process, Windows packaged-app enumeration, `.lnk` target metadata, usage history, and filesystem change notifications still need Windows-specific implementation and testing. The current alpha can be run as a normal desktop process.
+
+USN Journal, MFT indexing, Windows Search integration, and an elevated service are intentionally not enabled yet. They should be added only after measuring the background crawler and `ReadDirectoryChangesW` implementation on real machines.
+
+## Installer
+
+After building the release executable, open `installer/auris.iss` with Inno Setup and compile it. This produces `dist\AurisSetup.exe`. The installer is per-user and does not require administrator privileges.
