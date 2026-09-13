@@ -1,0 +1,51 @@
+import { Button, LineEdit, ListView, VerticalBox } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    title: "Auris";
+    width: 760px;
+    height: 480px;
+    background: #202124;
+
+    in-out property <string> query;
+    in-out property <[string]> results;
+    callback search-changed(string);
+    callback result-activated(int);
+
+    Rectangle {
+        border-radius: 14px;
+        background: #202124;
+        border-width: 1px;
+        border-color: #45464b;
+
+        VerticalBox {
+            padding: 18px;
+            spacing: 12px;
+
+            LineEdit {
+                text <=> root.query;
+                placeholder-text: "Search apps, files, and commands";
+                font-size: 22px;
+                edited(text) => { root.search-changed(text); }
+            }
+
+            ListView {
+                for result[index] in root.results: Rectangle {
+                    height: 42px;
+                    background: #00000000;
+
+                    Text {
+                        text: result;
+                        color: #f1f3f4;
+                        font-size: 16px;
+                        vertical-alignment: center;
+                        x: 8px;
+                    }
+
+                    TouchArea {
+                        clicked => { root.result-activated(index); }
+                    }
+                }
+            }
+        }
+    }
+}
