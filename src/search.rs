@@ -1,38 +1,80 @@
-use crate::{apps::AppEntry, files::{FileEntry, FileIndex}, tools::{self, ToolAction}};
+use std::collections::HashSet;
+
 use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
-use std::path::PathBuf;
 
-#[derive(Clone, Debug)]
-pub enum Action { App(AppEntry), File(PathBuf), Command(String), None }
+use crate::{
+    apps::{AppEntry, AppIndex},
+    files::FileIndex,
+    history::History,
+    model::{Kind, SearchResult},
+    tools,
+};
 
-#[derive(Clone, Debug)]
-pub struct SearchResult { pub label: String, pub detail: String, pub action: Action }
+const APP_BASE: i64 = 1_000;
+const FILE_BASE: i64 = 500;
 
-pub struct SearchEngine { apps: Vec<AppEntry>, files: FileIndex, matcher: SkimMatcherV2 }
+pub struct SearchEngine { apps: AppIndex, files: FileIndex, matcher: SkimMatcherV2 }
 
 impl SearchEngine {
-    pub fn new(apps: Vec<AppEntry>, files: FileIndex) -> Self { Self { apps, files, matcher: SkimMatcherV2::default() } }
+    pub fn new(apps: AppIndex, files: FileIndex) -> Self {
+        Self { apps, files, matcher: SkimMatcherV2::default().ignore_case() }
+    }
 
-    pub fn search(&self, query: &str) -> Vec<SearchResult> {
+    pub fn search(&self, query: &str, history: &History, limit: usize) -> Vec<SearchResult> {
         let query = query.trim();
-        let mut results = Vec::new();
-        if let Some(tool) = tools::evaluate(query) {
-            let action = match tool.action { ToolAction::Open(path) => Action::File(path), ToolAction::Command(command) => Action::Command(command), ToolAction::None => Action::None };
-            results.push(SearchResult { label: tool.label, detail: tool.detail, action });
+        if query.is_empty() { return history.recent(limit); }
+
+        let mut results = tools::evaluate(query);
+        let forced = query.starts_with('>');
+        if !forced {
+            for app in self.apps.snapshot().iter() {
+                let Some(score) = self.app_score(app, query) else { continue; };
+                let mut result = SearchResult::new(app.name.clone(), app.subtitle(), Kind::App, app.action(), 0);
+                result.score = APP_BASE + score + boost(history, &result);
+                results.push(result);
+            }
+            if query.chars().count() >= 2 {
+                for (score, entry) in self.files.search(query, limit * 3) {
+                    let kind = if entry.is_dir { Kind::Folder } else { Kind::File };
+                    let location = entry.path.parent().map(|parent| parent.display().to_string()).unwrap_or_default();
+                    let mut result = SearchResult::new(entry.name, location, kind, crate::model::Action::OpenPath(entry.path), 0);
+                    result.score = FILE_BASE + score + boost(history, &result);
+                    results.push(result);
+                }
+            }
         }
-        let mut app_matches: Vec<(i64, &AppEntry)> = self.apps.iter().filter_map(|app| {
-            let score = self.matcher.fuzzy_match(&app.display_name, query).or_else(|| {
-                app.aliases.iter().filter_map(|alias| self.matcher.fuzzy_match(alias, query)).max()
-            })?;
-            Some((score, app))
-        }).collect();
-        app_matches.sort_by(|a, b| b.0.cmp(&a.0));
-        results.extend(app_matches.into_iter().take(8).map(|(_, app)| SearchResult { label: app.display_name.clone(), detail: "Application".into(), action: Action::App(app.clone()) }));
-        if !query.is_empty() {
-            results.extend(self.files.search(query).into_iter().take(8).map(file_result));
+
+        results.sort_by(|a, b| b.score.cmp(&a.score));
+        let mut seen = HashSet::new();
+        results.retain(|result| result.history_key().map_or(true, |key| seen.insert(key)));
+        results.truncate(limit);
+        results
+    }
+
+    fn app_score(&self, app: &AppEntry, query: &str) -> Option<i64> {
+        let lower_query = query.to_lowercase();
+        let lower_name = app.name.to_lowercase();
+        let bonus = if lower_name == lower_query {
+            600
+        } else if lower_name.starts_with(&lower_query) {
+            350
+        } else if app.keywords.iter().any(|keyword| *keyword == lower_query) {
+            300
+        } else if app.keywords.iter().any(|keyword| keyword.starts_with(&lower_query)) {
+            200
+        } else {
+            0
+        };
+        let fuzzy = self.matcher.fuzzy_match(&app.name, query);
+        match (fuzzy, bonus) {
+            (None, 0) => None,
+            // Single-letter fuzzy matches are noise unless the name starts with that letter.
+            (Some(_), 0) if lower_query.chars().count() < 2 => None,
+            (score, bonus) => Some(score.unwrap_or(0).min(400) + bonus),
         }
-        results.into_iter().take(10).collect()
     }
 }
 
-fn file_result(file: FileEntry) -> SearchResult { SearchResult { label: file.name, detail: file.path.to_string_lossy().into_owned(), action: Action::File(file.path) } }
+fn boost(history: &History, result: &SearchResult) -> i64 {
+    result.history_key().map_or(0, |key| history.boost(&key))
+}
