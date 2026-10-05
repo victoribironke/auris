@@ -146,3 +146,7 @@ Uninstalling keeps your settings and history.
 - File search matches names, not contents. The index is rebuilt on a schedule; `ReadDirectoryChangesW` live updates are planned.
 - `sleep` can hibernate instead when hibernation is enabled (a Windows `SetSuspendState` quirk).
 - USN Journal/MFT indexing, Windows Search integration, and an elevated service are intentionally not enabled. They should be added only after measuring the crawler on real machines.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
