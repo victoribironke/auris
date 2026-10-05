@@ -1,6 +1,6 @@
 ; Build after `cargo build --release` with Inno Setup 6.
 #define MyAppName "Auris"
-#define MyAppVersion "0.2.0"
+#define MyAppVersion "0.2.1"
 #define MyAppPublisher "Victor Ibironke"
 #define MyAppExeName "auris.exe"
 
@@ -18,6 +18,9 @@ OutputBaseFilename=AurisSetup-{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\assets\auris.ico
+WizardSmallImageFile=wizard-small-1x.bmp,wizard-small-2x.bmp
+WizardImageFile=wizard-large-1x.bmp,wizard-large-2x.bmp
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
