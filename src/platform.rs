@@ -150,6 +150,133 @@ pub fn listen_for_activation(on_signal: impl Fn() + Send + 'static) {
     { let _ = on_signal; }
 }
 
+/// The real locations of the user's Desktop, Documents, Downloads, Pictures, Music,
+/// and Videos folders. Unlike `%USERPROFILE%\Documents`, this follows OneDrive and
+/// other folder redirection.
+pub fn user_folders() -> Vec<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::{
+            FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Videos,
+        };
+        [FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Pictures, FOLDERID_Music, FOLDERID_Videos]
+            .iter()
+            .filter_map(known_folder)
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else { return Vec::new(); };
+        ["Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos"].iter().map(|name| home.join(name)).collect()
+    }
+}
+
+#[cfg(windows)]
+fn known_folder(id: &windows_sys::core::GUID) -> Option<std::path::PathBuf> {
+    use windows_sys::Win32::{System::Com::CoTaskMemFree, UI::Shell::SHGetKnownFolderPath};
+    unsafe {
+        let mut raw: *mut u16 = std::ptr::null_mut();
+        let result = SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut raw);
+        let path = if result >= 0 && !raw.is_null() {
+            let length = (0..).take_while(|&i| *raw.add(i) != 0).count();
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(raw, length));
+            Some(std::path::PathBuf::from(text))
+        } else {
+            None
+        };
+        // The buffer must be freed even when the call fails.
+        CoTaskMemFree(raw as *const std::ffi::c_void);
+        path
+    }
+}
+
+/// Roots of drives built into this PC (SATA, NVMe, RAID, ...) other than the Windows
+/// drive, e.g. a second internal SSD. External drives are excluded: USB, SD/MMC, and
+/// FireWire disks, removable media, and mounted virtual disks (VHD/ISO), even though
+/// Windows reports external hard drives as "fixed" too.
+pub fn other_internal_drives() -> Vec<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+        const DRIVE_FIXED: u32 = 3;
+        let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()).to_ascii_uppercase();
+        let mask = unsafe { GetLogicalDrives() };
+        (0..26u8)
+            .filter(|bit| mask & (1 << bit) != 0)
+            .map(|bit| char::from(b'A' + bit))
+            .filter(|letter| !system_drive.starts_with(*letter))
+            .filter(|letter| unsafe { GetDriveTypeW(wide(&format!("{letter}:\\")).as_ptr()) } == DRIVE_FIXED)
+            .filter(|letter| match drive_bus(*letter) {
+                Some(bus) => !bus.is_external(),
+                None => {
+                    crate::logging::log(format!("Skipping {letter}: because its connection type is unknown"));
+                    false
+                }
+            })
+            .map(|letter| std::path::PathBuf::from(format!("{letter}:\\")))
+            .collect()
+    }
+    #[cfg(not(windows))]
+    { Vec::new() }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug)]
+struct DriveBus { bus_type: u32, removable: bool }
+
+#[cfg(windows)]
+impl DriveBus {
+    fn is_external(self) -> bool {
+        // STORAGE_BUS_TYPE: 4 = 1394, 7 = USB, 12 = SD, 13 = MMC, 14 = Virtual, 15 = FileBackedVirtual.
+        self.removable || matches!(self.bus_type, 4 | 7 | 12 | 13 | 14 | 15)
+    }
+}
+
+/// Asks the storage driver how the disk behind a drive letter is connected
+/// (`IOCTL_STORAGE_QUERY_PROPERTY` / `StorageDeviceProperty`).
+#[cfg(windows)]
+fn drive_bus(letter: char) -> Option<DriveBus> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::CreateFileW,
+        System::IO::DeviceIoControl,
+    };
+    const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D_1400;
+    const FILE_SHARE_READ_WRITE: u32 = 0x1 | 0x2;
+    const OPEN_EXISTING: u32 = 3;
+    // STORAGE_DEVICE_DESCRIPTOR field offsets.
+    const REMOVABLE_MEDIA_OFFSET: usize = 10;
+    const BUS_TYPE_OFFSET: usize = 28;
+
+    unsafe {
+        // Zero access rights are enough to query device properties, so no elevation is needed.
+        let path = wide(&format!("\\\\.\\{letter}:"));
+        let handle = CreateFileW(path.as_ptr(), 0, FILE_SHARE_READ_WRITE, std::ptr::null(), OPEN_EXISTING, 0, std::ptr::null_mut());
+        if handle == INVALID_HANDLE_VALUE { return None; }
+
+        // STORAGE_PROPERTY_QUERY { PropertyId = StorageDeviceProperty (0), QueryType = PropertyStandardQuery (0), AdditionalParameters }
+        let query = [0u32; 3];
+        let mut descriptor = [0u8; 1024];
+        let mut returned = 0u32;
+        let ok = DeviceIoControl(
+            handle,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            query.as_ptr().cast(),
+            std::mem::size_of_val(&query) as u32,
+            descriptor.as_mut_ptr().cast(),
+            descriptor.len() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        );
+        CloseHandle(handle);
+        if ok == 0 || (returned as usize) < BUS_TYPE_OFFSET + 4 { return None; }
+
+        let mut bus = [0u8; 4];
+        bus.copy_from_slice(&descriptor[BUS_TYPE_OFFSET..BUS_TYPE_OFFSET + 4]);
+        Some(DriveBus { bus_type: u32::from_le_bytes(bus), removable: descriptor[REMOVABLE_MEDIA_OFFSET] != 0 })
+    }
+}
+
 pub fn primary_screen_size() -> Option<(i32, i32)> {
     #[cfg(windows)]
     unsafe {
