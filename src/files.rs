@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::{atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}, Arc, RwLock},
     time::Instant,
@@ -19,15 +20,17 @@ pub struct CrawlOptions {
     pub roots: Vec<PathBuf>,
     pub exclude: Vec<String>,
     pub max_depth: usize,
+    pub max_files: usize,
     pub include_hidden: bool,
 }
 
 impl From<&Config> for CrawlOptions {
     fn from(config: &Config) -> Self {
         Self {
-            roots: config.search_roots.clone(),
+            roots: config.effective_roots(),
             exclude: config.exclude.iter().map(|name| name.to_lowercase()).collect(),
             max_depth: config.max_depth,
+            max_files: config.max_files,
             include_hidden: config.include_hidden,
         }
     }
@@ -46,8 +49,9 @@ struct Shared {
 #[derive(Clone, Default)]
 pub struct FileIndex { shared: Arc<Shared> }
 
-/// While the first crawl runs, partial results are published this often.
-const PUBLISH_EVERY: usize = 20_000;
+/// While the first crawl runs, partial results are published at 20k entries, then
+/// each time the count doubles, so copying them stays linear in the index size.
+const FIRST_PUBLISH: usize = 20_000;
 
 impl FileIndex {
     pub fn new() -> Self { Self::default() }
@@ -70,9 +74,15 @@ impl FileIndex {
             let started = Instant::now();
             shared.progress.store(0, Ordering::Relaxed);
             let first_crawl = shared.entries.read().map(|entries| entries.is_empty()).unwrap_or(true);
+            let roots: Vec<String> = options.roots.iter().map(|root| root.display().to_string()).collect();
+            log(format!("Indexing {}", roots.join(", ")));
+            let mut next_publish = FIRST_PUBLISH;
             let found = crawl(&options, |found| {
                 shared.progress.store(found.len(), Ordering::Relaxed);
-                if first_crawl && found.len() % PUBLISH_EVERY == 0 { publish(&shared, found.to_vec()); }
+                if first_crawl && found.len() >= next_publish {
+                    publish(&shared, found.to_vec());
+                    next_publish *= 2;
+                }
             });
             let count = found.len();
             publish(&shared, found);
@@ -108,14 +118,19 @@ fn publish(shared: &Shared, entries: Vec<FileEntry>) {
     shared.generation.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Iterative depth-first crawl; no recursion, so deep trees cannot overflow the stack.
+/// Breadth-first crawl: shallow, likely-relevant files are indexed first, which matters
+/// when `max_files` cuts a huge drive short. No recursion, so deep trees cannot overflow the stack.
 fn crawl(options: &CrawlOptions, mut on_entry: impl FnMut(&[FileEntry])) -> Vec<FileEntry> {
     let mut found = Vec::new();
-    let mut stack: Vec<(PathBuf, usize)> = Vec::new();
+    let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
     for root in &options.roots {
-        if root.is_dir() { stack.push((root.clone(), 0)); } else { log(format!("Skipping missing search root {}", root.display())); }
+        if root.is_dir() { queue.push_back((root.clone(), 0)); } else { log(format!("Skipping missing search root {}", root.display())); }
     }
-    while let Some((directory, depth)) = stack.pop() {
+    while let Some((directory, depth)) = queue.pop_front() {
+        if found.len() >= options.max_files {
+            log(format!("Stopped indexing at max_files = {}; raise it in config.txt to index more", options.max_files));
+            break;
+        }
         let Ok(items) = std::fs::read_dir(&directory) else { continue; };
         for item in items.flatten() {
             let Ok(file_type) = item.file_type() else { continue; };
@@ -127,7 +142,7 @@ fn crawl(options: &CrawlOptions, mut on_entry: impl FnMut(&[FileEntry])) -> Vec<
             let is_dir = file_type.is_dir();
             if is_dir && options.exclude.iter().any(|excluded| *excluded == lower_name) { continue; }
             let path = item.path();
-            if is_dir && depth < options.max_depth { stack.push((path.clone(), depth + 1)); }
+            if is_dir && depth < options.max_depth { queue.push_back((path.clone(), depth + 1)); }
             found.push(FileEntry { name, lower_name, path, is_dir });
             on_entry(&found);
         }
@@ -205,7 +220,7 @@ mod tests {
         std::fs::write(root.join("keep/deeper/deepest/b.txt"), "").unwrap();
         std::fs::write(root.join("node_modules/pkg/c.txt"), "").unwrap();
 
-        let options = CrawlOptions { roots: vec![root.clone()], exclude: vec!["node_modules".into()], max_depth: 1, include_hidden: false };
+        let options = CrawlOptions { roots: vec![root.clone()], exclude: vec!["node_modules".into()], max_depth: 1, max_files: 1_000, include_hidden: false };
         let names: Vec<String> = crawl(&options, |_| {}).into_iter().map(|entry| entry.name).collect();
         let _ = std::fs::remove_dir_all(&root);
 
