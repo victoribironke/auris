@@ -11,7 +11,7 @@ Press **Alt+Space** anywhere, type a few letters, and press **Enter**. Auris ope
 ### Search
 - **Apps**: Start Menu and desktop shortcuts (`.lnk`, `.url`, `.appref-ms`) plus Microsoft Store and other packaged apps (via `Get-StartApps`). Uninstallers and readme shortcuts are skipped.
 - **Smart app matching**: fuzzy matching plus exact, prefix, word, and initials matches (`vsc` finds **V**isual **S**tudio **C**ode).
-- **Files and folders**: a background crawler indexes your folders without blocking the UI. Results fill in while the first crawl runs, then the index refreshes on a schedule. Matches are ranked exact > prefix > word boundary > substring > all words in any order, and shorter names win ties.
+- **Files and folders**: a background crawler indexes your user folders (OneDrive-aware) and internal drives, never external ones, without blocking the UI. Results fill in while the first crawl runs, then the index refreshes on a schedule. Matches are ranked exact > prefix > word boundary > substring > all words in any order, and shorter names win ties.
 - **Learns what you use**: every launch is recorded, so frequent and recent items rank higher. With an empty search box, Auris shows the items you use most.
 
 ### Built-in tools
@@ -58,20 +58,30 @@ Settings live in `%LOCALAPPDATA%\Auris\config.txt`, which is created on first la
 ```ini
 hotkey = alt+space            # e.g. ctrl+shift+space, win+k (restart Auris to apply)
 
-root = %USERPROFILE%\Desktop  # folders to index; repeat for each one
-root = ~\Documents
-root = D:\Projects
+index_user_folders = true     # your user folder + Desktop/Documents/Downloads/... wherever they live
+index_internal_drives = true  # whole drives built into the PC (not the Windows drive)
+
+root = D:\                    # extra folders or drives to index; repeat for each one
+root = ~\Projects
 
 exclude = node_modules        # folder names to skip; listing any replaces the defaults
 exclude = .git
 
-max_depth = 12                # how deep to crawl below each root
+max_depth = 16                # how deep to crawl below each root
+max_files = 1500000           # stop indexing after this many entries (limits memory)
 max_results = 9               # 1–50
 reindex_minutes = 30          # 0 disables periodic re-indexing
 include_hidden = false        # index hidden/system files and dotfiles
 ```
 
-Run `reindex` after editing to reload settings and rebuild the index without restarting. Plain folder paths on their own line (the 0.1 format) are still read as roots.
+Run `reindex` after editing to reload settings and rebuild the index without restarting. Older config files are upgraded automatically on launch.
+
+### What gets indexed
+- **Your user folder** (`C:\Users\you`), plus the real Desktop, Documents, Downloads, Pictures, Music, and Videos. Auris asks Windows where those live (`SHGetKnownFolderPath`), so folders moved to **OneDrive** or another drive are found. `AppData`, dotfolders, and hidden/system files are skipped.
+- **Other internal drives**, such as a second SSD or hard drive, in full. Auris checks how each disk is connected and skips **USB, SD/MMC, FireWire, removable, and virtual (VHD/ISO) drives**. Windows reports USB hard drives as "fixed" disks, so drive type alone can't tell them apart. The rest of the Windows drive (`C:\Windows`, `Program Files`) is not crawled; apps are found through the Start Menu instead.
+- **Anything you add** with `root =`, including external drives.
+
+Folders are crawled breadth-first, so if `max_files` is reached on a huge drive, shallow (usually more relevant) files are already in. `%LOCALAPPDATA%\Auris\auris.log` lists the folders being indexed and how many entries were found.
 
 Other files in the same folder:
 - `history.txt` stores usage counts for ranking. Delete it to reset.
@@ -88,6 +98,8 @@ cargo build --release
 ```
 
 The optimized executable is written to `target\release\auris.exe`. Pass `--background` to start it hidden, waiting for the hotkey.
+
+The app icon is generated from `assets/make_icons.py` (needs Pillow). Running it rewrites `assets/auris.ico` (embedded in the exe by `build.rs`), `ui/icon.png` (window icon), and the installer's wizard images.
 
 ### Continuous builds
 
@@ -118,7 +130,7 @@ You don't need a local toolchain to get a build. [`.github/workflows/build.yml`]
 
 ## Installer
 
-After building the release executable, open `installer/auris.iss` with Inno Setup 6 and compile it. This produces `dist\AurisSetup-0.2.0.exe`. The installer:
+After building the release executable, open `installer/auris.iss` with Inno Setup 6 and compile it. This produces `dist\AurisSetup-0.2.1.exe`. The installer:
 - installs per user into `%LOCALAPPDATA%\Programs\Auris` without administrator rights,
 - can start Auris hidden when you sign in (checked by default),
 - can create a desktop shortcut,
