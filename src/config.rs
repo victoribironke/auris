@@ -9,9 +9,17 @@ const DEFAULT_EXCLUDES: &[&str] = &[
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub hotkey: String,
+    /// Index the user profile folder plus the real Desktop, Documents, Downloads, Pictures,
+    /// Music, and Videos folders, wherever they are redirected (e.g. OneDrive).
+    pub index_user_folders: bool,
+    /// Index whole drives built into the PC, other than the Windows drive. External drives never are.
+    pub index_internal_drives: bool,
+    /// Extra folders to index, in addition to the automatic ones.
     pub search_roots: Vec<PathBuf>,
     pub exclude: Vec<String>,
     pub max_depth: usize,
+    /// Upper bound on indexed entries, which keeps memory use predictable on huge drives.
+    pub max_files: usize,
     pub max_results: usize,
     pub reindex_minutes: u64,
     pub include_hidden: bool,
@@ -21,9 +29,12 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: DEFAULT_HOTKEY.into(),
-            search_roots: default_search_roots(),
+            index_user_folders: true,
+            index_internal_drives: true,
+            search_roots: Vec::new(),
             exclude: DEFAULT_EXCLUDES.iter().map(|name| (*name).to_owned()).collect(),
-            max_depth: 12,
+            max_depth: 16,
+            max_files: 1_500_000,
             max_results: 9,
             reindex_minutes: 30,
             include_hidden: false,
@@ -34,6 +45,12 @@ impl Default for Config {
 impl Config {
     pub fn load() -> Self {
         match std::fs::read_to_string(config_path()) {
+            // Files from older versions lack the newer settings; rewrite them so they are discoverable.
+            Ok(text) if !text.contains("index_user_folders") => {
+                let config = upgrade_legacy(Self::parse(&text));
+                if let Err(error) = config.save() { crate::logging::log(format!("Could not upgrade config.txt: {error}")); }
+                config
+            }
             Ok(text) => Self::parse(&text),
             Err(_) => Self::default(),
         }
@@ -56,7 +73,10 @@ impl Config {
                 Some((key, value)) if key == "max_depth" => config.max_depth = parse_or(value, config.max_depth).clamp(1, 64),
                 Some((key, value)) if key == "max_results" => config.max_results = parse_or(value, config.max_results).clamp(1, 50),
                 Some((key, value)) if key == "reindex_minutes" => config.reindex_minutes = parse_or(value, config.reindex_minutes).min(24 * 60),
-                Some((key, value)) if key == "include_hidden" => config.include_hidden = matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "1" | "on"),
+                Some((key, value)) if key == "max_files" => config.max_files = parse_or(value, config.max_files).max(1_000),
+                Some((key, value)) if key == "include_hidden" => config.include_hidden = parse_bool(value),
+                Some((key, value)) if key == "index_user_folders" => config.index_user_folders = parse_bool(value),
+                Some((key, value)) if key == "index_internal_drives" => config.index_internal_drives = parse_bool(value),
                 Some(_) => {}
                 None => roots.push(expand_path(line)),
             }
@@ -74,18 +94,44 @@ impl Config {
              # Global shortcut that shows and hides Auris, e.g. alt+space, ctrl+shift+space, super+k\n",
         );
         text.push_str(&format!("hotkey = {}\n\n", self.hotkey));
-        text.push_str("# Folders to index for file search. %VARIABLES% and ~ are expanded.\n");
+        text.push_str(&format!(
+            "# Index your user folder (C:\\Users\\you) and your Desktop, Documents, Downloads,\n\
+             # Pictures, Music, and Videos, wherever they really are (including OneDrive).\n\
+             index_user_folders = {}\n\n\
+             # Index other drives built into this PC (a second SSD or hard drive).\n\
+             # External USB, SD card, and virtual drives are never indexed automatically;\n\
+             # add them below with a root line if you want them.\n\
+             index_internal_drives = {}\n\n",
+            self.index_user_folders, self.index_internal_drives,
+        ));
+        text.push_str("# Extra folders or drives to index, one per line. %VARIABLES% and ~ are expanded.\n");
+        if self.search_roots.is_empty() { text.push_str("# root = D:\\\n# root = E:\\Projects\n"); }
         for root in &self.search_roots { text.push_str(&format!("root = {}\n", root.display())); }
         text.push_str("\n# Folder names that are never crawled (case-insensitive).\n");
         for name in &self.exclude { text.push_str(&format!("exclude = {name}\n")); }
         text.push_str(&format!(
             "\n# How deep to crawl below each root.\nmax_depth = {}\n\
+             \n# Stop indexing after this many files and folders (limits memory use).\nmax_files = {}\n\
              \n# Number of results shown at once (1-50).\nmax_results = {}\n\
              \n# Re-crawl files this often; 0 disables periodic re-indexing.\nreindex_minutes = {}\n\
              \n# Index hidden and system files and folders.\ninclude_hidden = {}\n",
-            self.max_depth, self.max_results, self.reindex_minutes, self.include_hidden,
+            self.max_depth, self.max_files, self.max_results, self.reindex_minutes, self.include_hidden,
         ));
         text
+    }
+
+    /// Every folder to crawl: automatic folders plus extra roots, without
+    /// duplicates or folders already covered by another root.
+    pub fn effective_roots(&self) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        if self.index_user_folders {
+            roots.extend(crate::platform::user_folders());
+            if let Some(home) = home_dir() { roots.push(PathBuf::from(home)); }
+            if let Some(onedrive) = std::env::var_os("OneDrive") { roots.push(PathBuf::from(onedrive)); }
+        }
+        if self.index_internal_drives { roots.extend(crate::platform::other_internal_drives()); }
+        roots.extend(self.search_roots.iter().cloned());
+        remove_nested_roots(roots)
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -95,6 +141,24 @@ impl Config {
 }
 
 fn parse_or<T: std::str::FromStr>(value: &str, fallback: T) -> T { value.parse().unwrap_or(fallback) }
+
+fn parse_bool(value: &str) -> bool { matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "1" | "on") }
+
+/// Drops duplicates and roots inside another root, comparing case-insensitively like Windows.
+pub fn remove_nested_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let key = |path: &PathBuf| {
+        let mut text = path.to_string_lossy().replace('/', "\\").to_lowercase();
+        if !text.ends_with('\\') { text.push('\\'); }
+        text
+    };
+    let mut keyed: Vec<(String, PathBuf)> = roots.into_iter().map(|root| (key(&root), root)).collect();
+    keyed.sort_by_key(|(key, _)| key.len());
+    let mut kept: Vec<(String, PathBuf)> = Vec::new();
+    for (root_key, root) in keyed {
+        if !kept.iter().any(|(kept_key, _)| root_key.starts_with(kept_key.as_str())) { kept.push((root_key, root)); }
+    }
+    kept.into_iter().map(|(_, root)| root).collect()
+}
 
 pub fn data_dir() -> PathBuf {
     #[cfg(windows)]
@@ -135,18 +199,43 @@ pub fn expand_path(value: &str) -> PathBuf {
     PathBuf::from(out)
 }
 
-fn default_search_roots() -> Vec<PathBuf> {
-    let Some(home) = home_dir().map(PathBuf::from) else { return Vec::new(); };
-    ["Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos"]
-        .iter()
-        .map(|name| home.join(name))
-        .filter(|path| path.is_dir())
-        .collect()
+/// Configs written by 0.1/0.2 listed `%USERPROFILE%\Documents` and friends as roots.
+/// Those are now covered (correctly, OneDrive-aware) by `index_user_folders`.
+fn upgrade_legacy(mut config: Config) -> Config {
+    if let Some(home) = home_dir() {
+        let legacy: Vec<PathBuf> = ["Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos"]
+            .iter()
+            .map(|name| PathBuf::from(&home).join(name))
+            .collect();
+        config.search_roots.retain(|root| !legacy.contains(root));
+    }
+    config
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removes_duplicate_and_nested_roots() {
+        let roots = remove_nested_roots(vec![
+            PathBuf::from("C:\\Users\\me\\OneDrive\\Documents"),
+            PathBuf::from("D:\\"),
+            PathBuf::from("c:\\users\\me\\onedrive"),
+            PathBuf::from("D:\\Projects"),
+            PathBuf::from("C:\\Users\\me\\OneDriveBackup"),
+        ]);
+        assert_eq!(roots, vec![PathBuf::from("D:\\"), PathBuf::from("c:\\users\\me\\onedrive"), PathBuf::from("C:\\Users\\me\\OneDriveBackup")]);
+    }
+
+    #[test]
+    fn new_settings_default_on_for_old_files() {
+        let config = Config::parse("hotkey = alt+space\nroot = D:\\Music\n");
+        assert!(config.index_user_folders && config.index_internal_drives);
+        let config = Config::parse("index_internal_drives = false\nmax_files = 5\n");
+        assert!(!config.index_internal_drives);
+        assert_eq!(config.max_files, 1_000);
+    }
 
     #[test]
     fn parses_keys_and_legacy_roots() {
