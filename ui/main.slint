@@ -162,7 +162,7 @@ component ResultRow inherits Rectangle {
         height: parent.height;
         horizontal-alignment: right;
         vertical-alignment: center;
-        text: root.selected ? root.item.primary-label + "  \u{21B5}" : root.item.kind;
+        text: root.selected ? root.item.primary-label : root.item.kind;
         font-size: 12px;
         color: root.selected ? Theme.text-muted : Theme.text-faint;
         overflow: elide;
@@ -176,7 +176,7 @@ component ResultRow inherits Rectangle {
 
 export component MainWindow inherits Window {
     title: "Auris";
-    icon: @image-url("icon.svg");
+    icon: @image-url("icon.png");
     width: 720px;
     height: 520px;
     no-frame: true;
@@ -460,28 +460,28 @@ export component MainWindow inherits Window {
 
                         FooterAction {
                             label: root.results.length > 0 ? root.results[root.selected-index].primary-label : "Open";
-                            keys: "\u{21B5}";
+                            keys: "Enter";
                             enabled: root.results.length > 0;
                             clicked => { root.activate(root.selected-index, "open"); }
                         }
 
                         FooterAction {
                             label: "Show in folder";
-                            keys: "Ctrl \u{21B5}";
+                            keys: "Ctrl+Enter";
                             enabled: root.results[root.selected-index].can-reveal;
                             clicked => { root.activate(root.selected-index, "reveal"); }
                         }
 
                         FooterAction {
                             label: "Copy";
-                            keys: "Shift \u{21B5}";
+                            keys: "Shift+Enter";
                             enabled: root.results.length > 0;
                             clicked => { root.activate(root.selected-index, "copy"); }
                         }
 
                         FooterAction {
                             label: "Admin";
-                            keys: "Ctrl Shift \u{21B5}";
+                            keys: "Ctrl+Shift+Enter";
                             enabled: root.results[root.selected-index].can-admin;
                             clicked => { root.activate(root.selected-index, "admin"); }
                         }
