@@ -89,6 +89,16 @@ cargo build --release
 
 The optimized executable is written to `target\release\auris.exe`. Pass `--background` to start it hidden, waiting for the hotkey.
 
+### Continuous builds
+
+You don't need a local toolchain to get a build. [`.github/workflows/build.yml`](.github/workflows/build.yml) runs on GitHub's Windows runners for every push to `main` and every pull request:
+
+1. `cargo test`
+2. `cargo build --release`
+3. Compiles the Inno Setup installer
+
+`auris.exe` and the installer are attached to each run as downloadable artifacts (**Actions** tab → pick a run → **Artifacts**). Pushing a tag such as `v0.2.0` also publishes both files as a GitHub Release. You can start a build by hand from the Actions tab with **Run workflow**.
+
 ### Project layout
 | Path | Purpose |
 |---|---|
